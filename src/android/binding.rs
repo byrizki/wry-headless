@@ -399,13 +399,7 @@ pub unsafe fn onEval(mut env: JNIEnv, _: JClass, _webview_id: JString, id: jint,
 }
 
 #[allow(non_snake_case)]
-pub unsafe fn onPdf(
-  env: JNIEnv,
-  _: JClass,
-  _webview_id: JString,
-  id: jint,
-  result: jbyteArray,
-) {
+pub unsafe fn onPdf(env: JNIEnv, _: JClass, _webview_id: JString, id: jint, result: jbyteArray) {
   let bytes = if result.is_null() {
     Err(crate::Error::PrintToPdfFailed(
       "Failed to generate PDF on Android".to_string(),

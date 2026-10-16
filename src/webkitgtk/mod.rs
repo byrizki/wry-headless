@@ -820,7 +820,11 @@ impl InnerWebView {
       std::env::temp_dir()
     };
     static COUNTER: crate::util::Counter = crate::util::Counter::new();
-    let temp_pdf = temp_dir.join(format!("wry_print_{}_{}.pdf", std::process::id(), COUNTER.next()));
+    let temp_pdf = temp_dir.join(format!(
+      "wry_print_{}_{}.pdf",
+      std::process::id(),
+      COUNTER.next()
+    ));
     let temp_uri = format!("file://{}", temp_pdf.display());
     print_settings.set("output-uri", Some(&temp_uri));
     print_settings.set_print_pages(gtk::PrintPages::All);
@@ -831,7 +835,14 @@ impl InnerWebView {
       print_settings.set_orientation(gtk::PageOrientation::Portrait);
     }
     print_settings.set_scale(options.scale * 100.0);
-    print_settings.set("print-background", Some(if options.print_background { "true" } else { "false" }));
+    print_settings.set(
+      "print-background",
+      Some(if options.print_background {
+        "true"
+      } else {
+        "false"
+      }),
+    );
 
     let page_setup = gtk::PageSetup::new();
     if let (Some(w), Some(h)) = (options.page_width, options.page_height) {

@@ -267,12 +267,24 @@ impl InnerWebView {
         .bounds
         .map(|b| b.position.to_physical::<f64>(scale_factor))
         .map(Into::into)
-        .unwrap_or_else(|| if is_headless { (0, 0) } else { (CW_USEDEFAULT, CW_USEDEFAULT) });
+        .unwrap_or_else(|| {
+          if is_headless {
+            (0, 0)
+          } else {
+            (CW_USEDEFAULT, CW_USEDEFAULT)
+          }
+        });
       let (width, height) = attributes
         .bounds
         .map(|b| b.size.to_physical::<u32>(scale_factor))
         .map(Into::into)
-        .unwrap_or_else(|| if is_headless { (800, 600) } else { (CW_USEDEFAULT, CW_USEDEFAULT) });
+        .unwrap_or_else(|| {
+          if is_headless {
+            (800, 600)
+          } else {
+            (CW_USEDEFAULT, CW_USEDEFAULT)
+          }
+        });
 
       (x, y, width, height)
     } else {
@@ -643,7 +655,6 @@ impl InnerWebView {
         let _ = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
       }
     }
-
 
     // Extension loading
     if pl_attrs.browser_extensions_enabled {
@@ -1996,8 +2007,11 @@ impl InnerWebView {
       } else if let Ok(webview7) = self.webview.cast::<ICoreWebView2_7>() {
         let temp_dir = std::env::temp_dir();
         static COUNTER: crate::util::Counter = crate::util::Counter::new();
-        let temp_pdf =
-          temp_dir.join(format!("wry_print_{}_{}.pdf", std::process::id(), COUNTER.next()));
+        let temp_pdf = temp_dir.join(format!(
+          "wry_print_{}_{}.pdf",
+          std::process::id(),
+          COUNTER.next()
+        ));
         let hstring_path = HSTRING::from(temp_pdf.to_string_lossy().as_ref());
         let temp_pdf_clone = temp_pdf.clone();
 

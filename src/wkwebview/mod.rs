@@ -173,7 +173,14 @@ impl InnerWebView {
       _ => return Err(Error::UnsupportedWindowHandle),
     };
 
-    unsafe { Self::new_ns_view(Some(&*(ns_view as *mut NSView)), attributes, pl_attrs, false) }
+    unsafe {
+      Self::new_ns_view(
+        Some(&*(ns_view as *mut NSView)),
+        attributes,
+        pl_attrs,
+        false,
+      )
+    }
   }
 
   pub fn new_as_child(
@@ -456,12 +463,10 @@ impl InnerWebView {
       };
       #[cfg(target_os = "ios")]
       let webview = {
-        let frame = ns_view
-          .map(|v| v.frame())
-          .unwrap_or_else(|| CGRect {
-            origin: CGPoint::new(0.0, 0.0),
-            size: CGSize::new(375.0, 667.0),
-          });
+        let frame = ns_view.map(|v| v.frame()).unwrap_or_else(|| CGRect {
+          origin: CGPoint::new(0.0, 0.0),
+          size: CGSize::new(375.0, 667.0),
+        });
         let webview: Retained<WryWebView> =
           objc2::msg_send![super(webview), initWithFrame: frame, configuration: &**config];
         // Without a background color the webview stays opaque and white, flashing before the
@@ -971,7 +976,8 @@ impl InnerWebView {
       );
       if !can_print {
         return Err(crate::Error::PrintToPdfFailed(
-          "Printing to PDF is not supported on this OS version (requires iOS 14+ or macOS 11+)".to_string(),
+          "Printing to PDF is not supported on this OS version (requires iOS 14+ or macOS 11+)"
+            .to_string(),
         ));
       }
 

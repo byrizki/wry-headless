@@ -2182,7 +2182,12 @@ impl WebView {
   }
 
   /// Print the current document to PDF and write it directly to the specified file path.
-  pub fn print_to_pdf_file<P, F>(&self, path: P, options: PrintToPdfOptions, callback: F) -> Result<()>
+  pub fn print_to_pdf_file<P, F>(
+    &self,
+    path: P,
+    options: PrintToPdfOptions,
+    callback: F,
+  ) -> Result<()>
   where
     P: AsRef<std::path::Path>,
     F: FnOnce(Result<()>) + Send + 'static,
@@ -2712,6 +2717,87 @@ mod tests {
   fn should_get_webview_version() {
     if let Err(error) = webview_version() {
       panic!("{}", error);
+    }
+  }
+
+  #[test]
+  #[cfg_attr(miri, ignore)]
+  fn should_test_headless_and_pdf_pipeline() {
+    #[cfg(target_os = "linux")]
+    if std::env::var("DISPLAY").is_err() && std::env::var("WAYLAND_DISPLAY").is_err() {
+      return;
+    }
+
+    use std::sync::mpsc::channel;
+
+    let (load_tx, load_rx) = channel();
+    let webview = WebViewBuilder::new()
+      .with_html("<h1>Headless &amp; PDF Test</h1>")
+      .with_on_page_load_handler(move |event, _| {
+        if event == PageLoadEvent::Finished {
+          let _ = load_tx.send(());
+        }
+      })
+      .build_headless();
+
+    let webview = match webview {
+      Ok(w) => w,
+      Err(Error::NotMainThread) => return,
+      Err(e) => panic!("Failed to build headless webview: {e:?}"),
+    };
+
+    #[cfg(target_os = "linux")]
+    {
+      while load_rx.try_recv().is_err() {
+        while gtk::events_pending() {
+          gtk::main_iteration();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+      }
+
+      // 1. Verify Print to PDF in-memory
+      let (pdf_mem_tx, pdf_mem_rx) = channel();
+      webview
+        .print_to_pdf(PrintToPdfOptions::default(), move |result| {
+          let _ = pdf_mem_tx.send(result);
+        })
+        .expect("print_to_pdf failed to start");
+
+      let pdf_bytes = loop {
+        while gtk::events_pending() {
+          gtk::main_iteration();
+        }
+        if let Ok(result) = pdf_mem_rx.try_recv() {
+          break result.expect("print_to_pdf operation failed");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+      };
+      assert!(!pdf_bytes.is_empty(), "PDF buffer must not be empty");
+
+      // 2. Verify Print to PDF file
+      let temp_path = std::env::temp_dir().join(format!("test_wry_pdf_{}.pdf", std::process::id()));
+      let (pdf_file_tx, pdf_file_rx) = channel();
+      let file_dest = temp_path.clone();
+      webview
+        .print_to_pdf_file(&file_dest, PrintToPdfOptions::default(), move |result| {
+          let _ = pdf_file_tx.send(result);
+        })
+        .expect("print_to_pdf_file failed to start");
+
+      loop {
+        while gtk::events_pending() {
+          gtk::main_iteration();
+        }
+        if let Ok(result) = pdf_file_rx.try_recv() {
+          result.expect("print_to_pdf_file operation failed");
+          break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+      }
+
+      let file_len = std::fs::metadata(&temp_path).map(|m| m.len()).unwrap_or(0);
+      assert!(file_len > 0, "PDF output file must have non-zero size");
+      let _ = std::fs::remove_file(&temp_path);
     }
   }
 }
