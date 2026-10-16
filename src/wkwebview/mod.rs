@@ -39,11 +39,9 @@ use objc2::{
 };
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{NSApplication, NSAutoresizingMaskOptions, NSTitlebarSeparatorStyle, NSView};
-#[cfg(target_os = "macos")]
-use objc2_core_foundation::CGSize;
-use objc2_core_foundation::{CGPoint, CGRect};
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{
-  MainThreadMarker, NSArray, NSBundle, NSDate, NSError, NSHTTPCookie, NSHTTPCookieDomain,
+  MainThreadMarker, NSArray, NSBundle, NSData, NSDate, NSError, NSHTTPCookie, NSHTTPCookieDomain,
   NSHTTPCookieExpires, NSHTTPCookieMaximumAge, NSHTTPCookieName, NSHTTPCookiePath,
   NSHTTPCookiePropertyKey, NSHTTPCookieSecure, NSHTTPCookieValue, NSHTTPCookieVersion,
   NSJSONSerialization, NSMutableDictionary, NSMutableURLRequest, NSNumber,
@@ -69,8 +67,9 @@ use crate::wkwebview::util::operating_system_version;
 use objc2_web_kit::WKWebView;
 
 use objc2_web_kit::{
-  WKAudiovisualMediaTypes, WKInactiveSchedulingPolicy, WKURLSchemeHandler, WKUserContentController,
-  WKUserScript, WKUserScriptInjectionTime, WKWebViewConfiguration, WKWebsiteDataStore,
+  WKAudiovisualMediaTypes, WKInactiveSchedulingPolicy, WKPDFConfiguration, WKURLSchemeHandler,
+  WKUserContentController, WKUserScript, WKUserScriptInjectionTime, WKWebViewConfiguration,
+  WKWebsiteDataStore,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
@@ -174,7 +173,7 @@ impl InnerWebView {
       _ => return Err(Error::UnsupportedWindowHandle),
     };
 
-    unsafe { Self::new_ns_view(&*(ns_view as *mut NSView), attributes, pl_attrs, false) }
+    unsafe { Self::new_ns_view(Some(&*(ns_view as *mut NSView)), attributes, pl_attrs, false) }
   }
 
   pub fn new_as_child(
@@ -190,11 +189,18 @@ impl InnerWebView {
       _ => return Err(Error::UnsupportedWindowHandle),
     };
 
-    unsafe { Self::new_ns_view(&*(ns_view as *mut NSView), attributes, pl_attrs, true) }
+    unsafe { Self::new_ns_view(Some(&*(ns_view as *mut NSView)), attributes, pl_attrs, true) }
+  }
+
+  pub fn new_headless(
+    attributes: WebViewAttributes,
+    pl_attrs: super::PlatformSpecificWebViewAttributes,
+  ) -> Result<Self> {
+    Self::new_ns_view(None, attributes, pl_attrs, false)
   }
 
   fn new_ns_view(
-    ns_view: &NSView,
+    ns_view: Option<&NSView>,
     attributes: WebViewAttributes,
     pl_attrs: super::PlatformSpecificWebViewAttributes,
     is_child: bool,
@@ -390,15 +396,25 @@ impl InnerWebView {
 
       #[cfg(target_os = "macos")]
       let webview = {
-        let window = ns_view.window().unwrap();
+        let (scale_factor, default_w, default_h) = if let Some(v) = ns_view {
+          let sf = v.window().map(|w| w.backingScaleFactor()).unwrap_or(1.0);
+          let frame = if is_child {
+            let f = NSView::frame(v);
+            (f.size.width as u32, f.size.height as u32)
+          } else {
+            (0, 0)
+          };
+          (sf, frame.0, frame.1)
+        } else {
+          (1.0, 800, 600)
+        };
 
-        let scale_factor = window.backingScaleFactor();
         let (x, y) = attributes
           .bounds
           .map(|b| b.position.to_logical::<f64>(scale_factor))
           .map(Into::into)
           .unwrap_or((0, 0));
-        let (w, h) = if is_child {
+        let (w, h) = if is_child || ns_view.is_none() {
           attributes
             .bounds
             .map(|b| b.size.to_logical::<u32>(scale_factor))
@@ -406,18 +422,11 @@ impl InnerWebView {
         } else {
           None
         }
-        .unwrap_or_else(|| {
-          if is_child {
-            let frame = NSView::frame(ns_view);
-            (frame.size.width as u32, frame.size.height as u32)
-          } else {
-            (0, 0)
-          }
-        });
+        .unwrap_or((default_w, default_h));
 
         let frame = CGRect {
-          origin: if is_child {
-            window_position(ns_view, x, y, h as f64)
+          origin: if is_child && ns_view.is_some() {
+            window_position(ns_view.unwrap(), x, y, h as f64)
           } else {
             CGPoint::new(x as f64, (0 - y - h as i32) as f64)
           },
@@ -447,7 +456,12 @@ impl InnerWebView {
       };
       #[cfg(target_os = "ios")]
       let webview = {
-        let frame = ns_view.frame();
+        let frame = ns_view
+          .map(|v| v.frame())
+          .unwrap_or_else(|| CGRect {
+            origin: CGPoint::new(0.0, 0.0),
+            size: CGSize::new(375.0, 667.0),
+          });
         let webview: Retained<WryWebView> =
           objc2::msg_send![super(webview), initWithFrame: frame, configuration: &**config];
         // Without a background color the webview stays opaque and white, flashing before the
@@ -465,7 +479,9 @@ impl InnerWebView {
         // setOpaque must come first since the color is applied too late on its own.
         webview.setOpaque(false);
         if !is_child {
-          ns_view.setBackgroundColor(Some(&color));
+          if let Some(v) = ns_view {
+            v.setBackgroundColor(Some(&color));
+          }
         }
         webview.setBackgroundColor(Some(&color));
         webview
@@ -608,13 +624,14 @@ impl InnerWebView {
       // ns window is required for the print operation
       #[cfg(target_os = "macos")]
       {
-        let ns_window = ns_view.window().unwrap();
-        // <https://developer.apple.com/documentation/appkit/nswindow/titlebarseparatorstyle>
-        // Available: macOS 11+
-        let can_set_titlebar_style =
-          ns_window.respondsToSelector(objc2::sel!(setTitlebarSeparatorStyle:));
-        if can_set_titlebar_style {
-          ns_window.setTitlebarSeparatorStyle(NSTitlebarSeparatorStyle::None);
+        if let Some(ns_window) = ns_view.and_then(|v| v.window()) {
+          // <https://developer.apple.com/documentation/appkit/nswindow/titlebarseparatorstyle>
+          // Available: macOS 11+
+          let can_set_titlebar_style =
+            ns_window.respondsToSelector(objc2::sel!(setTitlebarSeparatorStyle:));
+          if can_set_titlebar_style {
+            ns_window.setTitlebarSeparatorStyle(NSTitlebarSeparatorStyle::None);
+          }
         }
       }
 
@@ -624,7 +641,10 @@ impl InnerWebView {
         mtm,
         webview: webview.clone(),
         manager,
-        ns_view: ns_view.retain(),
+        ns_view: match ns_view {
+          Some(v) => v.retain(),
+          None => NSView::new(mtm),
+        },
         data_store,
         pending_scripts,
         ipc_handler_delegate,
@@ -666,51 +686,55 @@ impl InnerWebView {
       // Inject the web view into the window as main content
       #[cfg(target_os = "macos")]
       {
-        if is_child {
-          ns_view.addSubview(&webview);
-        } else {
-          // inject the webview into the window
-          let ns_window = ns_view.window().unwrap();
-
-          let parent_view = WryWebViewParent::new(mtm);
-
-          if let Some(position) = pl_attrs.traffic_light_inset {
-            parent_view.set_traffic_light_inset(&ns_window, position);
-          }
-
-          parent_view.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewHeightSizable
-              | NSAutoresizingMaskOptions::ViewWidthSizable,
-          );
-          parent_view.addSubview(&webview);
-
-          // Tell the webview receive keyboard events in the window.
-          // See https://github.com/tauri-apps/wry/issues/739
-          ns_window.setContentView(Some(&parent_view));
-          if attributes.visible && attributes.focused {
-            ns_window.makeFirstResponder(Some(&webview));
-          }
-
-          w.parent_view = Some(parent_view);
-        }
-
-        // Hidden or unfocused webviews must not activate their containing application.
-        if attributes.visible && attributes.focused {
-          let app = NSApplication::sharedApplication(mtm);
-          if os_major_version >= 14 {
-            // <https://developer.apple.com/documentation/appkit/nsapplication/activate()>
-            // Available: macOS 14+
-            NSApplication::activate(&app);
+        if let Some(ns_view) = ns_view {
+          if is_child {
+            ns_view.addSubview(&webview);
           } else {
-            #[allow(deprecated)]
-            NSApplication::activateIgnoringOtherApps(&app, true);
+            // inject the webview into the window
+            if let Some(ns_window) = ns_view.window() {
+              let parent_view = WryWebViewParent::new(mtm);
+
+              if let Some(position) = pl_attrs.traffic_light_inset {
+                parent_view.set_traffic_light_inset(&ns_window, position);
+              }
+
+              parent_view.setAutoresizingMask(
+                NSAutoresizingMaskOptions::ViewHeightSizable
+                  | NSAutoresizingMaskOptions::ViewWidthSizable,
+              );
+              parent_view.addSubview(&webview);
+
+              // Tell the webview receive keyboard events in the window.
+              // See https://github.com/tauri-apps/wry/issues/739
+              ns_window.setContentView(Some(&parent_view));
+              if attributes.visible && attributes.focused {
+                ns_window.makeFirstResponder(Some(&webview));
+              }
+
+              w.parent_view = Some(parent_view);
+            }
+          }
+
+          // Hidden or unfocused webviews must not activate their containing application.
+          if attributes.visible && attributes.focused {
+            let app = NSApplication::sharedApplication(mtm);
+            if os_major_version >= 14 {
+              // <https://developer.apple.com/documentation/appkit/nsapplication/activate()>
+              // Available: macOS 14+
+              NSApplication::activate(&app);
+            } else {
+              #[allow(deprecated)]
+              NSApplication::activateIgnoringOtherApps(&app, true);
+            }
           }
         }
       }
 
       #[cfg(target_os = "ios")]
       {
-        ns_view.addSubview(&webview);
+        if let Some(ns_view) = ns_view {
+          ns_view.addSubview(&webview);
+        }
       }
 
       Ok(w)
@@ -929,6 +953,64 @@ impl InnerWebView {
           std::ptr::null_mut(),
         )
       }
+    }
+
+    Ok(())
+  }
+
+  pub fn print_to_pdf(
+    &self,
+    options: crate::PrintToPdfOptions,
+    callback: Box<dyn FnOnce(crate::Result<Vec<u8>>) + Send + 'static>,
+  ) -> crate::Result<()> {
+    let mtm = self.mtm;
+    unsafe {
+      let can_print = NSObject::respondsToSelector(
+        &self.webview,
+        objc2::sel!(createPDFWithConfiguration:completionHandler:),
+      );
+      if !can_print {
+        return Err(crate::Error::PrintToPdfFailed(
+          "Printing to PDF is not supported on this OS version (requires iOS 14+ or macOS 11+)".to_string(),
+        ));
+      }
+
+      let config = WKPDFConfiguration::new(mtm);
+      if let (Some(w), Some(h)) = (options.page_width, options.page_height) {
+        let (width, height) = if options.landscape && w < h {
+          (h, w)
+        } else if !options.landscape && w > h {
+          (h, w)
+        } else {
+          (w, h)
+        };
+        config.setRect(CGRect {
+          origin: CGPoint::new(0.0, 0.0),
+          size: CGSize::new(width * 72.0, height * 72.0),
+        });
+      }
+
+      let callback = std::sync::Mutex::new(Some(callback));
+      let handler = block2::RcBlock::new(move |data: *mut NSData, err: *mut NSError| {
+        let cb = callback.lock().unwrap().take();
+        if let Some(cb) = cb {
+          if !err.is_null() {
+            let description = (*err).localizedDescription().to_string();
+            cb(Err(crate::Error::PrintToPdfFailed(description)));
+          } else if !data.is_null() {
+            let bytes = (&*data).to_vec();
+            cb(Ok(bytes));
+          } else {
+            cb(Err(crate::Error::PrintToPdfFailed(
+              "No PDF data returned from WKWebView".to_string(),
+            )));
+          }
+        }
+      });
+
+      self
+        .webview
+        .createPDFWithConfiguration_completionHandler(Some(&config), &handler);
     }
 
     Ok(())

@@ -79,4 +79,6 @@ pub enum Error {
   #[cfg(target_os = "android")]
   #[error("Activity not found")]
   ActivityNotFound,
+  #[error("Print to PDF failed: {0}")]
+  PrintToPdfFailed(String),
 }

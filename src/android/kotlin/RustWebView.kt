@@ -76,6 +76,89 @@ class RustWebView(context: Context, val initScripts: Array<String>, val id: Stri
         }
     }
 
+    fun printToPdf(id: Int, landscape: Boolean, pageWidth: Double, pageHeight: Double, marginTop: Double, marginBottom: Double, marginLeft: Double, marginRight: Double) {
+        post {
+            var readFd: android.os.ParcelFileDescriptor? = null
+            var writeFd: android.os.ParcelFileDescriptor? = null
+            if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.KITKAT) {
+                Rust.onPdf(this.id, id, null)
+                return@post
+            }
+            try {
+                val adapter = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                    this.createPrintDocumentAdapter("wry_pdf")
+                } else {
+                    this.createPrintDocumentAdapter()
+                }
+                val mediaSize = if (pageWidth > 0 && pageHeight > 0) {
+                    val wMils = (pageWidth * 1000).toInt()
+                    val hMils = (pageHeight * 1000).toInt()
+                    android.print.PrintAttributes.MediaSize("custom", "Custom", wMils, hMils)
+                } else if (landscape) {
+                    android.print.PrintAttributes.MediaSize.ISO_A4.asLandscape()
+                } else {
+                    android.print.PrintAttributes.MediaSize.ISO_A4.asPortrait()
+                }
+
+                val margins = android.print.PrintAttributes.Margins(
+                    (marginLeft * 1000).toInt(),
+                    (marginTop * 1000).toInt(),
+                    (marginRight * 1000).toInt(),
+                    (marginBottom * 1000).toInt()
+                )
+
+                val attributes = android.print.PrintAttributes.Builder()
+                    .setMediaSize(mediaSize)
+                    .setResolution(android.print.PrintAttributes.Resolution("pdf", "pdf", 300, 300))
+                    .setMinMargins(margins)
+                    .build()
+
+                val pipe = android.os.ParcelFileDescriptor.createPipe()
+                readFd = pipe[0]
+                writeFd = pipe[1]
+                val currentReadFd = readFd
+                val currentWriteFd = writeFd
+
+                adapter.onLayout(null, attributes, android.os.CancellationSignal(), object : android.print.PrintDocumentAdapter.LayoutResultCallback() {
+                    override fun onLayoutFinished(info: android.print.PrintDocumentInfo?, changed: Boolean) {
+                        adapter.onWrite(arrayOf(android.print.PageRange.ALL_PAGES), currentWriteFd, android.os.CancellationSignal(), object : android.print.PrintDocumentAdapter.WriteResultCallback() {
+                            override fun onWriteFinished(pages: Array<out android.print.PageRange>?) {
+                                try { currentWriteFd.close() } catch (_: Exception) {}
+                                Thread {
+                                    try {
+                                        val input = java.io.FileInputStream(currentReadFd.fileDescriptor)
+                                        val bytes = input.readBytes()
+                                        try { currentReadFd.close() } catch (_: Exception) {}
+                                        Rust.onPdf(this@RustWebView.id, id, bytes)
+                                    } catch (e: Exception) {
+                                        try { currentReadFd.close() } catch (_: Exception) {}
+                                        Rust.onPdf(this@RustWebView.id, id, null)
+                                    }
+                                }.start()
+                            }
+
+                            override fun onWriteFailed(error: CharSequence?) {
+                                try { currentWriteFd.close() } catch (_: Exception) {}
+                                try { currentReadFd.close() } catch (_: Exception) {}
+                                Rust.onPdf(this@RustWebView.id, id, null)
+                            }
+                        })
+                    }
+
+                    override fun onLayoutFailed(error: CharSequence?) {
+                        try { currentWriteFd.close() } catch (_: Exception) {}
+                        try { currentReadFd.close() } catch (_: Exception) {}
+                        Rust.onPdf(this@RustWebView.id, id, null)
+                    }
+                }, android.os.Bundle())
+            } catch (e: Exception) {
+                try { writeFd?.close() } catch (_: Exception) {}
+                try { readFd?.close() } catch (_: Exception) {}
+                Rust.onPdf(this.id, id, null)
+            }
+        }
+    }
+
     fun clearAllBrowsingData() {
         try {
             super.getContext().deleteDatabase("webviewCache.db")

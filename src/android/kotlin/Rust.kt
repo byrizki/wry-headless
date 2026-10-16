@@ -39,6 +39,7 @@ object Rust {
     @JvmStatic external fun onPageLoading(webviewId: String, url: String)
     @JvmStatic external fun onPageLoaded(webviewId: String, url: String)
     @JvmStatic external fun onEval(webviewId: String, id: Int, result: String)
+    @JvmStatic external fun onPdf(webviewId: String, id: Int, result: ByteArray?)
 
     @JvmStatic external fun handleReceivedTitle(webviewId: String, title: String)
 }

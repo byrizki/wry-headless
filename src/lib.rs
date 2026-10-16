@@ -349,8 +349,7 @@ mod error;
 mod inject_initialization_scripts;
 mod permissions;
 mod proxy;
-#[cfg(any(target_os = "macos", target_os = "android", target_os = "ios"))]
-mod util;
+pub(crate) mod util;
 mod web_context;
 
 #[cfg(target_os = "android")]
@@ -533,6 +532,45 @@ pub struct NewWindowFeatures {
 
 /// An id for a webview
 pub type WebViewId<'a> = &'a str;
+
+/// Options for printing webview document content to PDF.
+#[derive(Debug, Clone)]
+pub struct PrintToPdfOptions {
+  /// Whether to print in landscape orientation. Defaults to `false` (portrait).
+  pub landscape: bool,
+  /// Whether to print background graphics and colors. Defaults to `true`.
+  pub print_background: bool,
+  /// The scale of the page content. Defaults to `1.0`.
+  pub scale: f64,
+  /// The paper page width in inches. Defaults to `8.27` (A4).
+  pub page_width: Option<f64>,
+  /// The paper page height in inches. Defaults to `11.69` (A4).
+  pub page_height: Option<f64>,
+  /// Top margin in inches. Defaults to `0.4`.
+  pub margin_top: f64,
+  /// Bottom margin in inches. Defaults to `0.4`.
+  pub margin_bottom: f64,
+  /// Left margin in inches. Defaults to `0.4`.
+  pub margin_left: f64,
+  /// Right margin in inches. Defaults to `0.4`.
+  pub margin_right: f64,
+}
+
+impl Default for PrintToPdfOptions {
+  fn default() -> Self {
+    Self {
+      landscape: false,
+      print_background: true,
+      scale: 1.0,
+      page_width: Some(8.27),
+      page_height: Some(11.69),
+      margin_top: 0.4,
+      margin_bottom: 0.4,
+      margin_left: 0.4,
+      margin_right: 0.4,
+    }
+  }
+}
 
 // WebViewAttributes is not stable enough to be pub.
 struct WebViewAttributes<'a> {
@@ -1574,6 +1612,17 @@ impl<'a> WebViewBuilder<'a> {
     InnerWebView::new_as_child(window, self.attrs, self.platform_specific)
       .map(|webview| WebView { webview })
   }
+
+  /// Consume the builder and create the [`WebView`] in headless mode without attaching to any window.
+  ///
+  /// This creates an off-screen webview capable of rendering HTML, executing JavaScript, and generating
+  /// vector PDFs in memory without requiring a window handle or opening a visible desktop window.
+  pub fn build_headless(self) -> Result<WebView> {
+    self.error?;
+
+    InnerWebView::new_headless(self.attrs, self.platform_specific)
+      .map(|webview| WebView { webview })
+  }
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -2122,6 +2171,36 @@ impl WebView {
     self.webview.print()
   }
 
+  /// Print the current document to PDF in memory.
+  ///
+  /// The provided callback will be invoked asynchronously with the vector PDF bytes (`Vec<u8>`).
+  pub fn print_to_pdf<F>(&self, options: PrintToPdfOptions, callback: F) -> Result<()>
+  where
+    F: FnOnce(Result<Vec<u8>>) + Send + 'static,
+  {
+    self.webview.print_to_pdf(options, Box::new(callback))
+  }
+
+  /// Print the current document to PDF and write it directly to the specified file path.
+  pub fn print_to_pdf_file<P, F>(&self, path: P, options: PrintToPdfOptions, callback: F) -> Result<()>
+  where
+    P: AsRef<std::path::Path>,
+    F: FnOnce(Result<()>) + Send + 'static,
+  {
+    let path = path.as_ref().to_path_buf();
+    self.print_to_pdf(options, move |result| {
+      let res = result.and_then(|bytes| {
+        if let Some(parent) = path.parent() {
+          if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+          }
+        }
+        std::fs::write(&path, bytes).map_err(Into::into)
+      });
+      callback(res);
+    })
+  }
+
   /// Get a list of cookies for specific url.
   pub fn cookies_for_url(&self, url: &str) -> Result<Vec<cookie::Cookie<'static>>> {
     self.webview.cookies_for_url(url)
@@ -2586,6 +2665,7 @@ pub enum Theme {
 pub type RGBA = (u8, u8, u8, u8);
 
 /// Type of of page loading event
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PageLoadEvent {
   /// Indicates that the content of the page has started loading
   Started,

@@ -127,6 +127,7 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = [
   "WKUserScript",
   "WKHTTPCookieStore",
   "WKWindowFeatures",
+  "WKPDFConfiguration",
 ] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
   "std",
@@ -223,4 +224,4 @@ dom_query = { version = "0.28.0", default-features = false }
 
 [lints.rust.unexpected_cfgs]
 level = "warn"
-check-cfg = ["cfg(linux)", "cfg(gtk)"]
+check-cfg = ["cfg(linux)", "cfg(gtk)", 'cfg(feature, values("v2_42"))']

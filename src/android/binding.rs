@@ -9,16 +9,16 @@ use http::{
 use jni::errors::Result as JniResult;
 pub use jni::{
   self, JNIEnv,
-  objects::{GlobalRef, JClass, JMap, JObject, JString},
-  sys::{jboolean, jint, jobject, jstring},
+  objects::{GlobalRef, JByteArray, JClass, JMap, JObject, JString},
+  sys::{jboolean, jbyteArray, jint, jobject, jstring},
 };
 pub use ndk;
 use ndk::looper::{FdEvent, ThreadLooper};
 use std::os::fd::{AsFd, AsRawFd};
 
 use super::{
-  ASSET_LOADER_DOMAIN, EVAL_CALLBACKS, IPC, ON_LOAD_HANDLER, PERMISSION_HANDLER, REQUEST_HANDLER,
-  TITLE_CHANGE_HANDLER, URL_LOADING_OVERRIDE,
+  ASSET_LOADER_DOMAIN, EVAL_CALLBACKS, IPC, ON_LOAD_HANDLER, PDF_CALLBACKS, PERMISSION_HANDLER,
+  REQUEST_HANDLER, TITLE_CHANGE_HANDLER, URL_LOADING_OVERRIDE,
   main_pipe::{MAIN_PIPE, MainPipe},
 };
 
@@ -68,6 +68,7 @@ macro_rules! android_binding {
       jboolean
     );
     android_fn!($domain, $package, Rust, onEval, [JString, jint, JString]);
+    android_fn!($domain, $package, Rust, onPdf, [JString, jint, jbyteArray]);
     android_fn!($domain, $package, Rust, onPageLoading, [JString, JString]);
     android_fn!($domain, $package, Rust, onPageLoaded, [JString, JString]);
     android_fn!($domain, $package, Rust, ipc, [JString, JString, JString]);
@@ -394,6 +395,34 @@ pub unsafe fn onEval(mut env: JNIEnv, _: JClass, _webview_id: JString, id: jint,
       #[cfg(feature = "tracing")]
       tracing::warn!("Failed to parse JString: {_e}");
     }
+  }
+}
+
+#[allow(non_snake_case)]
+pub unsafe fn onPdf(
+  env: JNIEnv,
+  _: JClass,
+  _webview_id: JString,
+  id: jint,
+  result: jbyteArray,
+) {
+  let bytes = if result.is_null() {
+    Err(crate::Error::PrintToPdfFailed(
+      "Failed to generate PDF on Android".to_string(),
+    ))
+  } else {
+    let byte_array = unsafe { JByteArray::from_raw(result) };
+    env
+      .convert_byte_array(&byte_array)
+      .map_err(|e| crate::Error::PrintToPdfFailed(e.to_string()))
+  };
+  if let Some(cb) = PDF_CALLBACKS
+    .get_or_init(Default::default)
+    .lock()
+    .unwrap()
+    .remove(&id)
+  {
+    cb(bytes);
   }
 }
 

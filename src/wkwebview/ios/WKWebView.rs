@@ -370,7 +370,7 @@ impl WKWebView {
       completion_handler: &block2::Block<dyn Fn(*mut NSImage, *mut NSError)>,
     );
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     // #[cfg(all(feature = "WKPDFConfiguration", feature = "block2"))]
     #[unsafe(method(createPDFWithConfiguration:completionHandler:))]
     pub unsafe fn createPDFWithConfiguration_completionHandler(

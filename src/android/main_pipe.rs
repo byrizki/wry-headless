@@ -16,7 +16,10 @@ use std::{
   sync::{Arc, LazyLock, Mutex},
 };
 
-use super::{EVAL_CALLBACKS, EVAL_ID_GENERATOR, EvalCallback, WebviewId, find_class};
+use super::{
+  EVAL_CALLBACKS, EVAL_ID_GENERATOR, EvalCallback, PDF_CALLBACKS, PdfCallback, WebviewId,
+  find_class,
+};
 
 pub type ActivityId = i32;
 
@@ -107,8 +110,7 @@ pub fn get_webview(activity_id: ActivityId) -> Option<GlobalRef> {
   ACTIVITY_PROXY
     .lock()
     .unwrap()
-    .get(&activity_id)
-    .unwrap()
+    .get(&activity_id)?
     .webview
     .as_ref()
     .cloned()
@@ -235,12 +237,14 @@ impl<'a> MainPipe<'a> {
         }
 
         let webview_class_name = format!("{package}/RustWebView");
-        self.env.call_method(
-          &activity,
-          "setWebView",
-          format!("(L{webview_class_name};)V"),
-          &[(&webview).into()],
-        )?;
+        if !attrs.is_headless {
+          self.env.call_method(
+            &activity,
+            "setWebView",
+            format!("(L{webview_class_name};)V"),
+            &[(&webview).into()],
+          )?;
+        }
         // Navigation
         if let Some(u) = url {
           if let Ok(url) = self.env.new_string(u) {
@@ -373,6 +377,43 @@ impl<'a> MainPipe<'a> {
             "(ILjava/lang/String;)V",
             &[id.into(), (&s).into()],
           )?;
+        }
+      }
+      WebViewMessage::PrintToPdf(id, options, callback) => {
+        if let Some(webview) = get_webview(activity_id) {
+          PDF_CALLBACKS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(id, callback);
+
+          let landscape = options.landscape;
+          let page_width = options.page_width.unwrap_or(0.0);
+          let page_height = options.page_height.unwrap_or(0.0);
+          let margin_top = options.margin_top;
+          let margin_bottom = options.margin_bottom;
+          let margin_left = options.margin_left;
+          let margin_right = options.margin_right;
+
+          let _ = self.env.call_method(
+            webview.as_obj(),
+            "printToPdf",
+            "(IZDDDDDD)V",
+            &[
+              id.into(),
+              landscape.into(),
+              page_width.into(),
+              page_height.into(),
+              margin_top.into(),
+              margin_bottom.into(),
+              margin_left.into(),
+              margin_right.into(),
+            ],
+          );
+        } else {
+          callback(Err(Error::PrintToPdfFailed(
+            "No webview found for activity".to_string(),
+          )));
         }
       }
       WebViewMessage::SetBackgroundColor(background_color) => {
@@ -607,6 +648,7 @@ fn set_background_color<'a>(
 pub(crate) enum WebViewMessage {
   CreateWebView(CreateWebViewAttributes),
   Eval(String, Option<EvalCallback>),
+  PrintToPdf(i32, crate::PrintToPdfOptions, PdfCallback),
   SetBackgroundColor(RGBA),
   GetWebViewVersion(Sender<Result<String, Error>>),
   GetUrl(Sender<String>),
@@ -643,6 +685,7 @@ pub(crate) struct CreateWebViewAttributes {
   pub user_agent: Option<String>,
   pub initialization_scripts: Vec<InitializationScript>,
   pub javascript_disabled: bool,
+  pub is_headless: bool,
 }
 
 // SAFETY: only use this when you are sure the span will be dropped on the same thread it was entered

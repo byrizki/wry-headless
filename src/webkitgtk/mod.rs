@@ -99,6 +99,11 @@ pub(crate) struct InnerWebView {
 
 impl Drop for InnerWebView {
   fn drop(&mut self) {
+    if let Some(toplevel) = self.webview.toplevel() {
+      if toplevel.is::<gtk::OffscreenWindow>() {
+        unsafe { toplevel.destroy() };
+      }
+    }
     unsafe { self.webview.destroy() }
   }
 }
@@ -138,6 +143,23 @@ impl InnerWebView {
       let _ = pl_attrs;
       Err(Error::UnsupportedWindowHandle)
     }
+  }
+
+  pub fn new_headless(
+    attributes: WebViewAttributes,
+    pl_attrs: super::PlatformSpecificWebViewAttributes,
+  ) -> Result<Self> {
+    if !gtk::is_initialized() {
+      gtk::init().map_err(|e| Error::PrintToPdfFailed(format!("Failed to initialize GTK: {e}")))?;
+    }
+    let offscreen = gtk::OffscreenWindow::new();
+    let (width, height) = attributes
+      .bounds
+      .map(|b| b.size.to_logical::<i32>(1.0))
+      .map(Into::into)
+      .unwrap_or((800, 600));
+    offscreen.set_default_size(width, height);
+    Self::new_gtk(&offscreen, attributes, pl_attrs)
   }
 
   #[cfg(feature = "x11")]
@@ -779,6 +801,77 @@ impl InnerWebView {
   pub fn print(&self) -> Result<()> {
     let print = webkit2gtk::PrintOperation::new(&self.webview);
     print.run_dialog(None::<&gtk::Window>);
+    Ok(())
+  }
+
+  pub fn print_to_pdf(
+    &self,
+    options: crate::PrintToPdfOptions,
+    callback: Box<dyn FnOnce(Result<Vec<u8>>) + Send + 'static>,
+  ) -> Result<()> {
+    let print_op = webkit2gtk::PrintOperation::new(&self.webview);
+    let print_settings = gtk::PrintSettings::new();
+    print_settings.set_printer("Print to File");
+    print_settings.set("output-file-format", Some("pdf"));
+
+    let temp_dir = if std::path::Path::new("/dev/shm").is_dir() {
+      std::path::PathBuf::from("/dev/shm")
+    } else {
+      std::env::temp_dir()
+    };
+    static COUNTER: crate::util::Counter = crate::util::Counter::new();
+    let temp_pdf = temp_dir.join(format!("wry_print_{}_{}.pdf", std::process::id(), COUNTER.next()));
+    let temp_uri = format!("file://{}", temp_pdf.display());
+    print_settings.set("output-uri", Some(&temp_uri));
+    print_settings.set_print_pages(gtk::PrintPages::All);
+
+    if options.landscape {
+      print_settings.set_orientation(gtk::PageOrientation::Landscape);
+    } else {
+      print_settings.set_orientation(gtk::PageOrientation::Portrait);
+    }
+    print_settings.set_scale(options.scale * 100.0);
+    print_settings.set("print-background", Some(if options.print_background { "true" } else { "false" }));
+
+    let page_setup = gtk::PageSetup::new();
+    if let (Some(w), Some(h)) = (options.page_width, options.page_height) {
+      let custom_paper = gtk::PaperSize::new_custom("custom", "Custom", w, h, gtk::Unit::Inch);
+      page_setup.set_paper_size(&custom_paper);
+    }
+    page_setup.set_orientation(if options.landscape {
+      gtk::PageOrientation::Landscape
+    } else {
+      gtk::PageOrientation::Portrait
+    });
+    page_setup.set_top_margin(options.margin_top, gtk::Unit::Inch);
+    page_setup.set_bottom_margin(options.margin_bottom, gtk::Unit::Inch);
+    page_setup.set_left_margin(options.margin_left, gtk::Unit::Inch);
+    page_setup.set_right_margin(options.margin_right, gtk::Unit::Inch);
+    print_op.set_page_setup(&page_setup);
+
+    print_op.set_print_settings(&print_settings);
+
+    let callback_cell = Arc::new(Mutex::new(Some(callback)));
+    let temp_pdf_clone = temp_pdf.clone();
+    let cb_finished = callback_cell.clone();
+
+    print_op.connect_finished(move |_| {
+      let res = std::fs::read(&temp_pdf_clone).map_err(crate::Error::Io);
+      let _ = std::fs::remove_file(&temp_pdf_clone);
+      if let Some(cb) = cb_finished.lock().unwrap().take() {
+        cb(res);
+      }
+    });
+
+    let cb_failed = callback_cell.clone();
+    print_op.connect_failed(move |_, err| {
+      let _ = std::fs::remove_file(&temp_pdf);
+      if let Some(cb) = cb_failed.lock().unwrap().take() {
+        cb(Err(crate::Error::PrintToPdfFailed(err.to_string())));
+      }
+    });
+
+    print_op.print();
     Ok(())
   }
 

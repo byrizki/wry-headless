@@ -87,6 +87,10 @@ type EvalCallback = Box<dyn Fn(String) + Send + 'static>;
 static EVAL_ID_GENERATOR: Counter = Counter::new();
 static EVAL_CALLBACKS: OnceLock<Mutex<HashMap<i32, EvalCallback>>> = OnceLock::new();
 
+pub(crate) type PdfCallback = Box<dyn FnOnce(crate::Result<Vec<u8>>) + Send + 'static>;
+pub(crate) static PDF_ID_GENERATOR: Counter = Counter::new();
+pub(crate) static PDF_CALLBACKS: OnceLock<Mutex<HashMap<i32, PdfCallback>>> = OnceLock::new();
+
 pub fn destroy_webview(activity_id: ActivityId, webview_id: &WebviewId) {
   WEBVIEW_ATTRIBUTES.lock().unwrap().remove(&activity_id);
   IPC.lock().unwrap().remove(webview_id);
@@ -161,6 +165,14 @@ impl InnerWebView {
     Self::new(window, attributes, pl_attrs)
   }
 
+  pub fn new_headless(
+    attributes: WebViewAttributes,
+    pl_attrs: super::PlatformSpecificWebViewAttributes,
+  ) -> Result<Self> {
+    let activity_id = first_activity_id().ok_or(Error::ActivityNotFound)?;
+    Self::new_inner(activity_id, attributes, pl_attrs, true)
+  }
+
   pub fn new(
     window: &impl HasWindowHandle,
     attributes: WebViewAttributes,
@@ -175,6 +187,15 @@ impl InnerWebView {
     let window_manager = unsafe { JObject::from_raw(window_manager.as_ptr().cast()) };
     let activity_id =
       activity_id_for_window_manager(window_manager).expect("no available activity");
+    Self::new_inner(activity_id, attributes, pl_attrs, false)
+  }
+
+  fn new_inner(
+    activity_id: ActivityId,
+    attributes: WebViewAttributes,
+    pl_attrs: super::PlatformSpecificWebViewAttributes,
+    is_headless: bool,
+  ) -> Result<Self> {
     let WebViewAttributes {
       url,
       html,
@@ -322,6 +343,7 @@ impl InnerWebView {
       user_agent,
       initialization_scripts,
       javascript_disabled,
+      is_headless,
     };
 
     WEBVIEW_ATTRIBUTES
@@ -335,6 +357,19 @@ impl InnerWebView {
   }
 
   pub fn print(&self) -> crate::Result<()> {
+    Ok(())
+  }
+
+  pub fn print_to_pdf(
+    &self,
+    options: crate::PrintToPdfOptions,
+    callback: Box<dyn FnOnce(crate::Result<Vec<u8>>) + Send + 'static>,
+  ) -> Result<()> {
+    let id = PDF_ID_GENERATOR.next() as i32;
+    MainPipe::send(
+      self.activity_id,
+      WebViewMessage::PrintToPdf(id, options, callback),
+    );
     Ok(())
   }
 

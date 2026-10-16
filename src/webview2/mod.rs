@@ -76,10 +76,12 @@ pub(crate) struct InnerWebView {
 impl Drop for InnerWebView {
   fn drop(&mut self) {
     let _ = unsafe { self.controller.Close() };
-    if self.is_child {
+    if self.is_child || self.parent.borrow().0.is_null() {
       let _ = unsafe { DestroyWindow(self.hwnd) };
     }
-    unsafe { Self::dettach_parent_subclass(*self.parent.borrow()) }
+    if !self.parent.borrow().0.is_null() {
+      unsafe { Self::dettach_parent_subclass(*self.parent.borrow()) }
+    }
   }
 }
 
@@ -109,6 +111,14 @@ impl InnerWebView {
     };
 
     Self::new_in_hwnd(parent, attributes, pl_attrs, true)
+  }
+
+  #[inline]
+  pub fn new_headless(
+    attributes: WebViewAttributes,
+    pl_attrs: super::PlatformSpecificWebViewAttributes,
+  ) -> Result<Self> {
+    Self::new_in_hwnd(HWND::default(), attributes, pl_attrs, false)
   }
 
   #[inline]
@@ -235,25 +245,34 @@ impl InnerWebView {
 
     unsafe { RegisterClassExW(&class) };
 
-    let mut window_styles = WS_CHILD | WS_CLIPCHILDREN;
-    if attributes.visible {
+    let is_headless = parent.0.is_null();
+    let mut window_styles = if is_headless {
+      WS_POPUP | WS_CLIPCHILDREN
+    } else {
+      WS_CHILD | WS_CLIPCHILDREN
+    };
+    if !is_headless && attributes.visible {
       window_styles |= WS_VISIBLE;
     }
 
-    let dpi = unsafe { util::hwnd_dpi(parent) };
-    let scale_factor = util::dpi_to_scale_factor(dpi);
+    let scale_factor = if is_headless {
+      1.0
+    } else {
+      let dpi = unsafe { util::hwnd_dpi(parent) };
+      util::dpi_to_scale_factor(dpi)
+    };
 
-    let (x, y, width, height) = if is_child {
+    let (x, y, width, height) = if is_child || is_headless {
       let (x, y) = attributes
         .bounds
         .map(|b| b.position.to_physical::<f64>(scale_factor))
         .map(Into::into)
-        .unwrap_or((CW_USEDEFAULT, CW_USEDEFAULT));
+        .unwrap_or_else(|| if is_headless { (0, 0) } else { (CW_USEDEFAULT, CW_USEDEFAULT) });
       let (width, height) = attributes
         .bounds
         .map(|b| b.size.to_physical::<u32>(scale_factor))
         .map(Into::into)
-        .unwrap_or((CW_USEDEFAULT, CW_USEDEFAULT));
+        .unwrap_or_else(|| if is_headless { (800, 600) } else { (CW_USEDEFAULT, CW_USEDEFAULT) });
 
       (x, y, width, height)
     } else {
@@ -271,7 +290,7 @@ impl InnerWebView {
         y,
         width,
         height,
-        Some(parent),
+        if is_headless { None } else { Some(parent) },
         None,
         GetModuleHandleW(PCWSTR::null()).map(Into::into).ok(),
         None,
@@ -611,14 +630,14 @@ impl InnerWebView {
     }
 
     // Subclass parent for resizing and focus
-    if !is_child {
+    if !is_child && !parent.0.is_null() {
       unsafe { Self::attach_parent_subclass(parent, controller) };
     }
 
     unsafe {
-      controller.SetIsVisible(attributes.visible)?;
+      controller.SetIsVisible(!is_headless && attributes.visible)?;
 
-      if attributes.focused {
+      if !is_headless && attributes.focused {
         // Ignore this error since it fails when the window is minimized
         let _ = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
       }
@@ -1398,6 +1417,9 @@ impl InnerWebView {
 
   #[inline]
   unsafe fn dettach_parent_subclass(parent: HWND) {
+    if parent.0.is_null() {
+      return;
+    }
     unsafe {
       SendMessageW(parent, PARENT_DESTROY_MESSAGE, None, None);
       let _ = RemoveWindowSubclass(
@@ -1888,6 +1910,122 @@ impl InnerWebView {
       "window.print()",
       None::<Box<dyn FnOnce(String) + Send + 'static>>,
     )
+  }
+
+  pub fn print_to_pdf(
+    &self,
+    options: crate::PrintToPdfOptions,
+    callback: Box<dyn FnOnce(Result<Vec<u8>>) + Send + 'static>,
+  ) -> Result<()> {
+    unsafe {
+      let print_settings = self
+        .env
+        .cast::<ICoreWebView2Environment6>()
+        .and_then(|env6| {
+          let settings = env6.CreatePrintSettings()?;
+          if options.landscape {
+            settings.SetOrientation(COREWEBVIEW2_PRINT_ORIENTATION_LANDSCAPE)?;
+          } else {
+            settings.SetOrientation(COREWEBVIEW2_PRINT_ORIENTATION_PORTRAIT)?;
+          }
+          if let Some(w) = options.page_width {
+            settings.SetPageWidth(w)?;
+          }
+          if let Some(h) = options.page_height {
+            settings.SetPageHeight(h)?;
+          }
+          settings.SetMarginTop(options.margin_top)?;
+          settings.SetMarginBottom(options.margin_bottom)?;
+          settings.SetMarginLeft(options.margin_left)?;
+          settings.SetMarginRight(options.margin_right)?;
+          settings.SetShouldPrintBackgrounds(options.print_background)?;
+          settings.SetScaleFactor(options.scale)?;
+          Ok(settings)
+        })
+        .ok();
+
+      let callback = std::sync::Mutex::new(Some(callback));
+
+      if let Ok(webview16) = self.webview.cast::<ICoreWebView2_16>() {
+        let handler =
+          PrintToPdfStreamCompletedHandler::create(Box::new(move |error_code, stream| {
+            let res: Result<Vec<u8>> = (|| -> windows::core::Result<Vec<u8>> {
+              error_code?;
+              let stream = stream.ok_or_else(|| windows::core::Error::from(E_POINTER))?;
+              let mut stat = std::mem::MaybeUninit::uninit();
+              stream.Stat(stat.as_mut_ptr(), STATFLAG_NONAME)?;
+              let stat = stat.assume_init();
+              let total_size = stat.cbSize as usize;
+              if total_size > 500 * 1024 * 1024 {
+                return Err(windows::core::Error::new(
+                  windows::core::HRESULT(-1),
+                  "PDF data exceeds 500MB safety limit",
+                ));
+              }
+              let mut buf = vec![0u8; total_size];
+              let mut total_read = 0usize;
+              while total_read < total_size {
+                let mut read = 0u32;
+                let remaining = (total_size - total_read) as u32;
+                stream
+                  .Read(
+                    buf[total_read..].as_mut_ptr() as *mut std::ffi::c_void,
+                    remaining,
+                    Some(&mut read),
+                  )
+                  .ok()?;
+                if read == 0 {
+                  break;
+                }
+                total_read += read as usize;
+              }
+              buf.truncate(total_read);
+              Ok(buf)
+            })()
+            .map_err(|e| Error::PrintToPdfFailed(e.to_string()));
+
+            if let Some(cb) = callback.lock().unwrap().take() {
+              cb(res);
+            }
+            Ok(())
+          }));
+
+        webview16.PrintToPdfStream(print_settings.as_ref(), &handler)?;
+      } else if let Ok(webview7) = self.webview.cast::<ICoreWebView2_7>() {
+        let temp_dir = std::env::temp_dir();
+        static COUNTER: crate::util::Counter = crate::util::Counter::new();
+        let temp_pdf =
+          temp_dir.join(format!("wry_print_{}_{}.pdf", std::process::id(), COUNTER.next()));
+        let hstring_path = HSTRING::from(temp_pdf.to_string_lossy().as_ref());
+        let temp_pdf_clone = temp_pdf.clone();
+
+        let handler = PrintToPdfCompletedHandler::create(Box::new(move |error_code, success| {
+          let res = if error_code.is_ok() && success {
+            fs::read(&temp_pdf_clone).map_err(Into::into)
+          } else {
+            Err(Error::PrintToPdfFailed(
+              error_code
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "PrintToPdf failed".to_string()),
+            ))
+          };
+          let _ = fs::remove_file(&temp_pdf_clone);
+          if let Some(cb) = callback.lock().unwrap().take() {
+            cb(res);
+          }
+          Ok(())
+        }));
+
+        webview7.PrintToPdf(&hstring_path, print_settings.as_ref(), &handler)?;
+      } else {
+        return Err(Error::PrintToPdfFailed(
+          "Printing to PDF is not supported by current WebView2 version".to_string(),
+        ));
+      }
+    }
+
+    Ok(())
   }
 
   pub fn clear_all_browsing_data(&self) -> Result<()> {
