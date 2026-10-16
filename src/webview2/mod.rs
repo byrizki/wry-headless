@@ -192,8 +192,10 @@ impl InnerWebView {
 
     if is_child {
       w.set_bounds(bounds.unwrap_or_default())?;
-    } else {
+    } else if !parent.0.is_null() {
       w.resize_to_parent()?;
+    } else if let Some(bounds) = bounds {
+      w.set_bounds(bounds)?;
     }
 
     Ok(w)

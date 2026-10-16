@@ -2730,6 +2730,7 @@ mod tests {
 
     use std::sync::mpsc::channel;
 
+    #[allow(unused_variables)]
     let (load_tx, load_rx) = channel();
     let webview = WebViewBuilder::new()
       .with_html("<h1>Headless &amp; PDF Test</h1>")
@@ -2740,6 +2741,7 @@ mod tests {
       })
       .build_headless();
 
+    #[allow(unused_variables)]
     let webview = match webview {
       Ok(w) => w,
       Err(Error::NotMainThread) => return,
@@ -2793,6 +2795,68 @@ mod tests {
           break;
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
+      }
+
+      let file_len = std::fs::metadata(&temp_path).map(|m| m.len()).unwrap_or(0);
+      assert!(file_len > 0, "PDF output file must have non-zero size");
+      let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+      use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, QS_ALLINPUT,
+      };
+
+      let pump_messages = || unsafe {
+        let mut msg = std::mem::zeroed();
+        while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+          DispatchMessageW(&msg);
+        }
+        let _ = MsgWaitForMultipleObjectsEx(
+          None,
+          10,
+          QS_ALLINPUT,
+          windows::Win32::UI::WindowsAndMessaging::MWMO_INPUTAVAILABLE,
+        );
+      };
+
+      while load_rx.try_recv().is_err() {
+        pump_messages();
+      }
+
+      // 1. Verify Print to PDF in-memory
+      let (pdf_mem_tx, pdf_mem_rx) = channel();
+      webview
+        .print_to_pdf(PrintToPdfOptions::default(), move |result| {
+          let _ = pdf_mem_tx.send(result);
+        })
+        .expect("print_to_pdf failed to start");
+
+      let pdf_bytes = loop {
+        pump_messages();
+        if let Ok(result) = pdf_mem_rx.try_recv() {
+          break result.expect("print_to_pdf operation failed");
+        }
+      };
+      assert!(!pdf_bytes.is_empty(), "PDF buffer must not be empty");
+
+      // 2. Verify Print to PDF file
+      let temp_path = std::env::temp_dir().join(format!("test_wry_pdf_{}.pdf", std::process::id()));
+      let (pdf_file_tx, pdf_file_rx) = channel();
+      let file_dest = temp_path.clone();
+      webview
+        .print_to_pdf_file(&file_dest, PrintToPdfOptions::default(), move |result| {
+          let _ = pdf_file_tx.send(result);
+        })
+        .expect("print_to_pdf_file failed to start");
+
+      loop {
+        pump_messages();
+        if let Ok(result) = pdf_file_rx.try_recv() {
+          result.expect("print_to_pdf_file operation failed");
+          break;
+        }
       }
 
       let file_len = std::fs::metadata(&temp_path).map(|m| m.len()).unwrap_or(0);
