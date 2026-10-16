@@ -29,8 +29,21 @@ fn get_all_benchmarks() -> Vec<(String, String)> {
       "wry_cpu_intensive".into(),
       format!("tests/target/{target_triple}/release/bench_cpu_intensive{extension}"),
     ),
+    (
+      "wry_headless".into(),
+      format!("tests/target/{target_triple}/release/bench_headless{extension}"),
+    ),
+    (
+      "wry_print_to_pdf_memory".into(),
+      format!("tests/target/{target_triple}/release/bench_print_to_pdf_memory{extension}"),
+    ),
+    (
+      "wry_print_to_pdf_file".into(),
+      format!("tests/target/{target_triple}/release/bench_print_to_pdf_file{extension}"),
+    ),
   ]
 }
+
 
 fn run_strace_benchmarks(new_data: &mut utils::BenchResult) -> Result<()> {
   use std::io::Read;
