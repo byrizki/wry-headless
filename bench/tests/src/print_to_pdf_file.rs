@@ -144,13 +144,15 @@ fn main() -> wry::Result<()> {
 
       if load_rx.try_recv().is_ok() && !printed_clone.swap(true, Ordering::SeqCst) {
         let target_path = temp_path.clone();
+        let path_clone = target_path.clone();
         let _ = webview_for_event.print_to_pdf_file(&target_path, PrintToPdfOptions::default(), move |result| {
           result.expect("PDF file write failed");
-          let file_len = std::fs::metadata(&target_path).map(|m| m.len()).unwrap_or(0);
+          let file_len = std::fs::metadata(&path_clone).map(|m| m.len()).unwrap_or(0);
           assert!(file_len > 0, "PDF output file must exist and have non-zero size");
-          let _ = std::fs::remove_file(&target_path);
+          let _ = std::fs::remove_file(&path_clone);
           exit(0);
         });
+
       }
     });
   }

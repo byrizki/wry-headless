@@ -634,6 +634,7 @@ impl InnerWebView {
       unsafe { Self::attach_parent_subclass(parent, controller) };
     }
 
+    let is_headless = parent.0.is_null();
     unsafe {
       controller.SetIsVisible(!is_headless && attributes.visible)?;
 
@@ -642,6 +643,7 @@ impl InnerWebView {
         let _ = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
       }
     }
+
 
     // Extension loading
     if pl_attrs.browser_extensions_enabled {
