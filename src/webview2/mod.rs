@@ -648,11 +648,22 @@ impl InnerWebView {
 
     let is_headless = parent.0.is_null();
     unsafe {
-      controller.SetIsVisible(!is_headless && attributes.visible)?;
-
-      if !is_headless && attributes.focused {
-        // Ignore this error since it fails when the window is minimized
-        let _ = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+      if is_headless {
+        let mut rect = RECT::default();
+        let _ = GetClientRect(hwnd, &mut rect);
+        controller.SetBounds(RECT {
+          left: 0,
+          top: 0,
+          right: rect.right - rect.left,
+          bottom: rect.bottom - rect.top,
+        })?;
+        controller.SetIsVisible(true)?;
+      } else {
+        controller.SetIsVisible(attributes.visible)?;
+        if attributes.focused {
+          // Ignore this error since it fails when the window is minimized
+          let _ = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+        }
       }
     }
 

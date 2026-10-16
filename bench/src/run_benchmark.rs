@@ -300,10 +300,11 @@ fn main() -> Result<()> {
   env::set_current_dir(utils::bench_root_path())?;
 
   let format =
-    time::format_description::parse("[year]-[month]-[day]T[hour]:[minute]:[second]Z").unwrap();
+    time::format_description::parse_borrowed::<1>("[year]-[month]-[day]T[hour]:[minute]:[second]Z").unwrap();
   let now = time::OffsetDateTime::now_utc();
   let mut new_data = utils::BenchResult {
     created_at: now.format(&format).unwrap(),
+
     sha1: utils::run_collect(&["git", "rev-parse", "HEAD"])
       .0
       .trim()

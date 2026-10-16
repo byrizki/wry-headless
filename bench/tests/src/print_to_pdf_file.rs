@@ -82,6 +82,9 @@ const HTML_CONTENT: &str = r#"
 "#;
 
 fn main() -> wry::Result<()> {
+  #[cfg(not(target_os = "linux"))]
+  let event_loop = tao::event_loop::EventLoop::new();
+
   let temp_path = std::env::temp_dir().join(format!("bench_wry_pdf_file_{}.pdf", std::process::id()));
   let (load_tx, load_rx) = channel();
 
@@ -93,6 +96,7 @@ fn main() -> wry::Result<()> {
       }
     })
     .build_headless()?;
+
 
   #[cfg(target_os = "linux")]
   {
@@ -131,16 +135,16 @@ fn main() -> wry::Result<()> {
   {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
-    use tao::event_loop::{ControlFlow, EventLoop};
+    use tao::event_loop::ControlFlow;
 
     let printed = Arc::new(AtomicBool::new(false));
     let printed_clone = printed.clone();
     let webview_ref = Arc::new(webview);
     let webview_for_event = webview_ref.clone();
 
-    let event_loop = EventLoop::new();
     event_loop.run(move |_, _, control_flow| {
       *control_flow = ControlFlow::Poll;
+
 
       if load_rx.try_recv().is_ok() && !printed_clone.swap(true, Ordering::SeqCst) {
         let target_path = temp_path.clone();

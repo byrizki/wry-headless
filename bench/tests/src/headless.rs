@@ -3,58 +3,50 @@
 // SPDX-License-Identifier: MIT
 
 use std::process::exit;
-use std::sync::mpsc::channel;
+use wry::http::Request;
 use wry::WebViewBuilder;
 
 fn main() -> wry::Result<()> {
+  #[cfg(not(target_os = "linux"))]
+  let event_loop = tao::event_loop::EventLoop::new();
+
   let html = r#"
     <!DOCTYPE html>
-    <html>
-      <head><meta charset="utf-8"></head>
-      <body>
-        <h1>Wry Headless Benchmark</h1>
-        <script>
-          document.addEventListener('DOMContentLoaded', () => {
-            if (window.ipc) {
-              window.ipc.postMessage('ready');
-            }
-          });
-        </script>
-      </body>
-    </html>
+    <body>
+    <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      ipc.postMessage('dom-loaded')
+    })
+    </script>
+    </body>
   "#;
 
-  let (tx, rx) = channel();
+  let handler = |req: Request<String>| {
+    if req.body() == "dom-loaded" {
+      exit(0);
+    }
+  };
 
   let _webview = WebViewBuilder::new()
     .with_html(html)
-    .with_ipc_handler(move |req| {
-      if req.body() == "ready" {
-        let _ = tx.send(());
-      }
-    })
+    .with_ipc_handler(handler)
     .build_headless()?;
 
   #[cfg(target_os = "linux")]
   {
-    while rx.try_recv().is_err() {
+    loop {
       while gtk::events_pending() {
         gtk::main_iteration();
       }
       std::thread::sleep(std::time::Duration::from_millis(1));
     }
-    exit(0);
   }
 
   #[cfg(not(target_os = "linux"))]
   {
-    use tao::event_loop::{ControlFlow, EventLoop};
-    let event_loop = EventLoop::new();
+    use tao::event_loop::ControlFlow;
     event_loop.run(move |_, _, control_flow| {
-      *control_flow = ControlFlow::Poll;
-      if rx.try_recv().is_ok() {
-        exit(0);
-      }
+      *control_flow = ControlFlow::Wait;
     });
   }
 
