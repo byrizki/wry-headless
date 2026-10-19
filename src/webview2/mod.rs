@@ -352,11 +352,26 @@ impl InnerWebView {
         let username = std::env::var("USERNAME")
           .or_else(|_| std::env::var("USER"))
           .unwrap_or_else(|_| "default".to_string());
-        let dir = std::env::temp_dir().join(format!("PrintedJs.WebView2_{username}"));
+        let safe_username: String = username
+          .chars()
+          .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
+              c
+            } else {
+              '_'
+            }
+          })
+          .collect();
+        let dir = std::env::temp_dir().join(format!("PrintedJs.WebView2_{safe_username}"));
         let _ = std::fs::create_dir_all(&dir);
         Some(dir)
       })
-      .map(|p| HSTRING::from(p.as_path()));
+      .map(|p| {
+        let path_str = p.to_string_lossy();
+        let clean = path_str.strip_prefix(r"\\?\").unwrap_or(&path_str);
+        let trimmed = clean.trim_end_matches(['\\', '/']);
+        HSTRING::from(trimmed)
+      });
 
     // additional browser args
     let additional_browser_args = pl_attrs.additional_browser_args.unwrap_or_else(|| {
@@ -1656,7 +1671,24 @@ impl InnerWebView {
       }
       temp_files.borrow_mut().push(file_path.clone());
 
-      let file_url = format!("file:///{}", file_path.to_string_lossy().replace('\\', "/"));
+      let path_str = file_path.to_string_lossy();
+      let clean_path = path_str
+        .strip_prefix(r"\\?\UNC\")
+        .map(|p| format!("//{}", p))
+        .unwrap_or_else(|| {
+          path_str
+            .strip_prefix(r"\\?\")
+            .unwrap_or(&path_str)
+            .to_string()
+        });
+      let normalized = clean_path.replace('\\', "/");
+      let file_url = if normalized.starts_with("//") {
+        format!("file:{normalized}")
+      } else if normalized.starts_with('/') {
+        format!("file://{normalized}")
+      } else {
+        format!("file:///{normalized}")
+      };
       let url = HSTRING::from(file_url);
       unsafe { webview.Navigate(&url) }.map_err(Into::into)
     } else {
