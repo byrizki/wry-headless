@@ -1644,7 +1644,11 @@ impl InnerWebView {
 
       let temp_dir = std::env::temp_dir().join("PrintedJs.HtmlTemp");
       let _ = std::fs::create_dir_all(&temp_dir);
-      let file_path = temp_dir.join(format!("doc_{}_{}_{count}.html", std::process::id(), timestamp));
+      let file_path = temp_dir.join(format!(
+        "doc_{}_{}_{count}.html",
+        std::process::id(),
+        timestamp
+      ));
       std::fs::write(&file_path, html.as_bytes())?;
 
       for old_file in temp_files.borrow_mut().drain(..) {
