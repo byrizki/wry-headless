@@ -71,10 +71,14 @@ pub(crate) struct InnerWebView {
   // the webview gets dropped, otherwise we'll have a memory leak
   #[allow(dead_code)]
   drag_drop_controller: Option<DragDropController>,
+  temp_files: RefCell<Vec<PathBuf>>,
 }
 
 impl Drop for InnerWebView {
   fn drop(&mut self) {
+    for path in self.temp_files.borrow().iter() {
+      let _ = std::fs::remove_file(path);
+    }
     let _ = unsafe { self.controller.Close() };
     if self.is_child || self.parent.borrow().0.is_null() {
       let _ = unsafe { DestroyWindow(self.hwnd) };
@@ -158,6 +162,7 @@ impl InnerWebView {
       background_color,
       pl_attrs.profile_name.as_deref(),
     )?;
+    let temp_files = RefCell::new(Vec::new());
     let webview = Self::init_webview(
       parent,
       hwnd,
@@ -167,6 +172,7 @@ impl InnerWebView {
       &controller,
       pl_attrs,
       is_child,
+      &temp_files,
     )?;
 
     let drag_drop_controller = drop_handler.map(|handler| {
@@ -188,6 +194,7 @@ impl InnerWebView {
       webview,
       env,
       drag_drop_controller,
+      temp_files,
     };
 
     if is_child {
@@ -335,7 +342,21 @@ impl InnerWebView {
       .context
       .as_deref()
       .and_then(|context| context.data_directory())
-      .map(HSTRING::from);
+      .map(PathBuf::from)
+      .or_else(|| {
+        std::env::var_os("WEBVIEW2_USER_DATA_FOLDER")
+          .filter(|v| !v.is_empty())
+          .map(PathBuf::from)
+      })
+      .or_else(|| {
+        let username = std::env::var("USERNAME")
+          .or_else(|_| std::env::var("USER"))
+          .unwrap_or_else(|_| "default".to_string());
+        let dir = std::env::temp_dir().join(format!("PrintedJs.WebView2_{username}"));
+        let _ = std::fs::create_dir_all(&dir);
+        Some(dir)
+      })
+      .map(|p| HSTRING::from(p.as_path()));
 
     // additional browser args
     let additional_browser_args = pl_attrs.additional_browser_args.unwrap_or_else(|| {
@@ -479,6 +500,7 @@ impl InnerWebView {
     controller: &ICoreWebView2Controller,
     pl_attrs: super::PlatformSpecificWebViewAttributes,
     is_child: bool,
+    temp_files: &RefCell<Vec<PathBuf>>,
   ) -> Result<ICoreWebView2> {
     let webview = unsafe { controller.CoreWebView2()? };
 
@@ -639,8 +661,7 @@ impl InnerWebView {
         unsafe { webview.Navigate(&url)? };
       }
     } else if let Some(html) = attributes.html {
-      let html = HSTRING::from(html);
-      unsafe { webview.NavigateToString(&html)? };
+      Self::navigate_html(&webview, &html, temp_files)?;
     }
 
     // Subclass parent for resizing and focus
@@ -1606,9 +1627,42 @@ impl InnerWebView {
     load_url_with_headers(&self.webview, &self.env, url, headers)
   }
 
+  const MAX_NAVIGATE_TO_STRING_CHARS: usize = 1_000_000;
+
+  fn navigate_html(
+    webview: &ICoreWebView2,
+    html: &str,
+    temp_files: &RefCell<Vec<PathBuf>>,
+  ) -> Result<()> {
+    if html.len() > Self::MAX_NAVIGATE_TO_STRING_CHARS {
+      static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+      let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+      let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+
+      let temp_dir = std::env::temp_dir().join("PrintedJs.HtmlTemp");
+      let _ = std::fs::create_dir_all(&temp_dir);
+      let file_path = temp_dir.join(format!("doc_{}_{}_{count}.html", std::process::id(), timestamp));
+      std::fs::write(&file_path, html.as_bytes())?;
+
+      for old_file in temp_files.borrow_mut().drain(..) {
+        let _ = std::fs::remove_file(old_file);
+      }
+      temp_files.borrow_mut().push(file_path.clone());
+
+      let file_url = format!("file:///{}", file_path.to_string_lossy().replace('\\', "/"));
+      let url = HSTRING::from(file_url);
+      unsafe { webview.Navigate(&url) }.map_err(Into::into)
+    } else {
+      let html = HSTRING::from(html);
+      unsafe { webview.NavigateToString(&html) }.map_err(Into::into)
+    }
+  }
+
   pub fn load_html(&self, html: &str) -> Result<()> {
-    let html = HSTRING::from(html);
-    unsafe { self.webview.NavigateToString(&html) }.map_err(Into::into)
+    Self::navigate_html(&self.webview, html, &self.temp_files)
   }
 
   pub fn reload(&self) -> Result<()> {
